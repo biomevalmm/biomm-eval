@@ -1,86 +1,218 @@
-#!/usr/bin/env python3
-"""
-Build Task B BioMM-Eval dataset from the curated genome CSV.
+# ============================================================
+# Task B: BioMM-Eval v2
+# Genome sequence + metadata classification benchmark
+# Paper-ready / repository version
+#
+# Features
+# - Long-context genome sequence evaluation
+# - Multimodal evaluation (sequence + metadata)
+# - Variant ablations:
+#     full
+#     sequence_only
+#     metadata_only
+#     metadata_counterfactual
+#     sequence_perturbed
+# - Resume support
+# - Retry support
+# - Interim metric computation
+# - Structured JSON outputs
+# - Balanced / full-dataset compatible
+#
+# Expected input:
+# selected_sequences_saureus199_cacnes200.csv
+#
+# Tested dataset:
+# - Staphylococcus aureus: 199
+# - Cutibacterium acnes: 200
+# ============================================================
 
-Input:
-  selected_sequences_saureus199_cacnes200.csv
+# ============================================================
+# 0. Install / imports
+# ============================================================
 
-Output:
-  taskB_samples.jsonl
+# !pip install -q openai pandas numpy scikit-learn tqdm
 
-Each JSONL row contains:
-  - sample_id
-  - assembly_accession
-  - true_label
-  - variant
-  - prompt
-  - metadata fields
-  - sequence length info
-"""
-
-import argparse
+import os
 import json
 import random
-from pathlib import Path
+import time
+import traceback
+from datetime import datetime
 
+import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
+from openai import OpenAI
 
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    classification_report
+)
+
+# ============================================================
+# 1. Config
+# ============================================================
+
+API_KEY = "YOUR_OPENAI_API_KEY"
+
+MODEL = "gpt-5.4-mini"
+MODEL_TAG = "gpt54mini"
+
+# ------------------------------------------------------------
+# Input dataset
+# ------------------------------------------------------------
+BASE_DIR = "/content/drive/MyDrive/_September_hard/task_09/meta_dna/auto_skin_genomes"
+
+SEQ_CSV = os.path.join(
+    BASE_DIR,
+    "selected_sequences_saureus199_cacnes200.csv"
+)
+
+# ------------------------------------------------------------
+# Output
+# ------------------------------------------------------------
+OUT_DIR = os.path.join(
+    BASE_DIR,
+    "biomm_taskB_v2_outputs"
+)
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+RESULTS_JSONL = os.path.join(
+    OUT_DIR,
+    f"taskB_{MODEL_TAG}_results_{RUN_ID}.jsonl"
+)
+
+FAILED_JSONL = os.path.join(
+    OUT_DIR,
+    f"taskB_{MODEL_TAG}_failed_{RUN_ID}.jsonl"
+)
+
+METRICS_CSV = os.path.join(
+    OUT_DIR,
+    f"taskB_{MODEL_TAG}_metrics_{RUN_ID}.csv"
+)
+
+RELIANCE_CSV = os.path.join(
+    OUT_DIR,
+    f"taskB_{MODEL_TAG}_reliance_{RUN_ID}.csv"
+)
+
+REPORT_TXT = os.path.join(
+    OUT_DIR,
+    f"taskB_{MODEL_TAG}_report_{RUN_ID}.txt"
+)
+
+# ------------------------------------------------------------
+# Classification setup
+# ------------------------------------------------------------
 CLASSES = [
     "Staphylococcus aureus",
-    "Cutibacterium acnes",
+    "Cutibacterium acnes"
 ]
+
+# ------------------------------------------------------------
+# Evaluation settings
+# ------------------------------------------------------------
+SEED = 42
+
+MAX_SEQUENCE_CHARS = 100_000
+
+PERTURB_RATE = 0.01
 
 VARIANTS = [
     "full",
     "sequence_only",
     "metadata_only",
     "metadata_counterfactual",
-    "sequence_perturbed",
+    "sequence_perturbed"
 ]
 
-DEFAULT_MAX_SEQUENCE_CHARS = 100_000
-DEFAULT_PERTURB_RATE = 0.01
-DEFAULT_SEED = 42
+# ------------------------------------------------------------
+# Runtime
+# ------------------------------------------------------------
+random.seed(SEED)
+
+client = OpenAI(api_key=API_KEY)
+
+print("MODEL:", MODEL)
+print("RUN_ID:", RUN_ID)
+print("RESULTS:", RESULTS_JSONL)
+
+# ============================================================
+# 2. Utility functions
+# ============================================================
+
+def append_jsonl(path, obj):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def clean_val(x: object) -> str:
+def clean_val(x):
+    """
+    Normalize missing metadata values.
+    """
     if pd.isna(x):
         return "unknown"
 
     x = str(x).strip()
 
-    if x.lower() in {
+    if x.lower() in [
         "",
         "nan",
         "none",
         "null",
         "missing",
         "not collected",
-        "not provided",
-    }:
+        "not provided"
+    ]:
         return "unknown"
 
     return x
 
 
-def normalize_organism_name(x: object) -> str:
+def normalize_organism_name(x):
+    """
+    Collapse organism aliases/subspecies into canonical labels.
+    """
     x = clean_val(x)
 
     if "Staphylococcus aureus" in x:
         return "Staphylococcus aureus"
 
-    if "Cutibacterium acnes" in x or "Propionibacterium acnes" in x:
+    if (
+        "Cutibacterium acnes" in x
+        or "Propionibacterium acnes" in x
+    ):
         return "Cutibacterium acnes"
 
     return x
 
 
-def sequence_context(seq: object, max_chars: int) -> tuple[str, int, int]:
+# ============================================================
+# 3. Sequence handling
+# ============================================================
+
+def sequence_context(seq, max_chars=MAX_SEQUENCE_CHARS):
+    """
+    Create long-context representation.
+
+    If sequence is too large:
+    - keep beginning
+    - keep middle
+    - keep end
+    """
+
     if pd.isna(seq):
         return "unknown", 0, 0
 
     seq = str(seq).upper()
+
     seq = "".join(c for c in seq if c in "ACGTN")
 
     full_len = len(seq)
@@ -96,7 +228,8 @@ def sequence_context(seq: object, max_chars: int) -> tuple[str, int, int]:
     start = seq[:part]
 
     mid_start = max(0, full_len // 2 - part // 2)
-    middle = seq[mid_start : mid_start + part]
+
+    middle = seq[mid_start:mid_start + part]
 
     end = seq[-part:]
 
@@ -109,24 +242,40 @@ def sequence_context(seq: object, max_chars: int) -> tuple[str, int, int]:
     )
 
     used_len = len(start) + len(middle) + len(end)
+
     return context, full_len, used_len
 
 
-def perturb_sequence(seq_text: str, mutation_rate: float, rng: random.Random) -> str:
+def perturb_sequence(seq_text, mutation_rate=PERTURB_RATE):
+    """
+    Random nucleotide substitutions.
+    Used for robustness testing.
+    """
+
     bases = ["A", "C", "G", "T"]
+
     out = []
 
     for c in seq_text:
-        if c in bases and rng.random() < mutation_rate:
+
+        if c in bases and random.random() < mutation_rate:
+
             choices = [b for b in bases if b != c]
-            out.append(rng.choice(choices))
+
+            out.append(random.choice(choices))
+
         else:
             out.append(c)
 
     return "".join(out)
 
 
-def metadata_block(row: pd.Series, counterfactual: bool, rng: random.Random) -> str:
+# ============================================================
+# 4. Metadata formatting
+# ============================================================
+
+def metadata_block(row, counterfactual=False):
+
     host = clean_val(row.get("host"))
     host_disease = clean_val(row.get("host_disease"))
     isolation_source = clean_val(row.get("isolation_source"))
@@ -138,39 +287,63 @@ def metadata_block(row: pd.Series, counterfactual: bool, rng: random.Random) -> 
     refseq_category = clean_val(row.get("refseq_category"))
     submitter = clean_val(row.get("submitter"))
 
+    # --------------------------------------------------------
+    # Counterfactual metadata perturbation
+    # --------------------------------------------------------
     if counterfactual:
-        host_choices = ["Homo sapiens", "human", "environment", "mouse", "unknown"]
+
+        host_choices = [
+            "Homo sapiens",
+            "human",
+            "mouse",
+            "environment",
+            "unknown"
+        ]
+
         disease_choices = [
             "acne",
-            "skin infection",
-            "wound infection",
             "healthy skin",
+            "skin infection",
             "bloodstream infection",
-            "unknown",
+            "wound infection",
+            "unknown"
         ]
+
         source_choices = [
             "skin",
             "acne lesion",
-            "wound",
             "blood",
+            "wound",
             "nasal swab",
             "environment",
-            "unknown",
+            "unknown"
         ]
+
         body_choices = [
             "skin",
             "face",
             "back",
-            "wound",
             "blood",
+            "wound",
             "nasal cavity",
-            "unknown",
+            "unknown"
         ]
 
-        host = rng.choice([x for x in host_choices if x != host])
-        host_disease = rng.choice([x for x in disease_choices if x != host_disease])
-        isolation_source = rng.choice([x for x in source_choices if x != isolation_source])
-        body_site = rng.choice([x for x in body_choices if x != body_site])
+        host = random.choice(
+            [x for x in host_choices if x != host]
+        )
+
+        host_disease = random.choice(
+            [x for x in disease_choices if x != host_disease]
+        )
+
+        isolation_source = random.choice(
+            [x for x in source_choices if x != isolation_source]
+        )
+
+        body_site = random.choice(
+            [x for x in body_choices if x != body_site]
+        )
 
     return f"""
 Metadata:
@@ -187,22 +360,30 @@ Metadata:
 """.strip()
 
 
-def build_prompt(
-    row: pd.Series,
-    variant: str,
-    max_sequence_chars: int,
-    perturb_rate: float,
-    rng: random.Random,
-) -> tuple[str, int, int]:
+# ============================================================
+# 5. Prompt construction
+# ============================================================
+
+def build_prompt(row, variant):
+
     seq_ctx, full_len, used_len = sequence_context(
         row.get("joined_sequence", ""),
-        max_sequence_chars,
+        MAX_SEQUENCE_CHARS
     )
 
+    # --------------------------------------------------------
+    # Full multimodal
+    # --------------------------------------------------------
     if variant == "full":
-        instruction = "You are given long genome DNA sequence segments and biological metadata."
+
+        instruction = (
+            "You are given long genome DNA sequence segments "
+            "and biological metadata."
+        )
+
         blocks = [
-            metadata_block(row, counterfactual=False, rng=rng),
+            metadata_block(row, counterfactual=False),
+
             f"""
 DNA sequence context:
 - original_joined_sequence_length: {full_len}
@@ -210,11 +391,19 @@ DNA sequence context:
 - sampling_strategy: beginning + middle + end segments
 
 {seq_ctx}
-""".strip(),
+""".strip()
         ]
 
+    # --------------------------------------------------------
+    # Sequence only
+    # --------------------------------------------------------
     elif variant == "sequence_only":
-        instruction = "You are given only long genome DNA sequence segments. No metadata is provided."
+
+        instruction = (
+            "You are given only long genome DNA sequence segments. "
+            "No metadata is provided."
+        )
+
         blocks = [
             f"""
 DNA sequence context:
@@ -226,17 +415,33 @@ DNA sequence context:
 """.strip()
         ]
 
+    # --------------------------------------------------------
+    # Metadata only
+    # --------------------------------------------------------
     elif variant == "metadata_only":
-        instruction = "You are given only biological metadata. No DNA sequence is provided."
-        blocks = [metadata_block(row, counterfactual=False, rng=rng)]
 
+        instruction = (
+            "You are given only biological metadata. "
+            "No DNA sequence is provided."
+        )
+
+        blocks = [
+            metadata_block(row, counterfactual=False)
+        ]
+
+    # --------------------------------------------------------
+    # Counterfactual metadata
+    # --------------------------------------------------------
     elif variant == "metadata_counterfactual":
+
         instruction = (
             "You are given original long genome DNA sequence segments "
             "but counterfactually modified metadata."
         )
+
         blocks = [
-            metadata_block(row, counterfactual=True, rng=rng),
+            metadata_block(row, counterfactual=True),
+
             f"""
 DNA sequence context:
 - original_joined_sequence_length: {full_len}
@@ -244,32 +449,42 @@ DNA sequence context:
 - sampling_strategy: beginning + middle + end segments
 
 {seq_ctx}
-""".strip(),
+""".strip()
         ]
 
+    # --------------------------------------------------------
+    # Perturbed sequence
+    # --------------------------------------------------------
     elif variant == "sequence_perturbed":
+
         instruction = (
             "You are given perturbed long genome DNA sequence segments "
             "and original biological metadata."
         )
-        perturbed = perturb_sequence(seq_ctx, perturb_rate, rng)
+
+        perturbed = perturb_sequence(
+            seq_ctx,
+            mutation_rate=PERTURB_RATE
+        )
+
         blocks = [
-            metadata_block(row, counterfactual=False, rng=rng),
+            metadata_block(row, counterfactual=False),
+
             f"""
 Perturbed DNA sequence context:
 - original_joined_sequence_length: {full_len}
 - sequence_characters_provided: {used_len}
-- perturbation_rate: {perturb_rate}
+- perturbation_rate: {PERTURB_RATE}
 - sampling_strategy: beginning + middle + end segments
 
 {perturbed}
-""".strip(),
+""".strip()
         ]
 
     else:
         raise ValueError(f"Unknown variant: {variant}")
 
-    joined_blocks = "\n\n".join(blocks)
+    joined = "\n\n".join(blocks)
 
     prompt = f"""
 Task:
@@ -281,14 +496,19 @@ Allowed labels:
 
 {instruction}
 
-{joined_blocks}
+{joined}
 
 Output requirements:
 - Return only valid JSON.
-- prediction must be exactly "Staphylococcus aureus" or "Cutibacterium acnes".
+- prediction must be exactly:
+  "Staphylococcus aureus"
+  or
+  "Cutibacterium acnes"
 - confidence must be between 0 and 1.
-- sequence_reliance and metadata_reliance must each be between 0 and 1.
-- If a modality is not provided, its reliance should be 0.
+- sequence_reliance and metadata_reliance
+  must each be between 0 and 1.
+- If a modality is not provided,
+  its reliance should be 0.
 
 JSON fields:
 prediction
@@ -302,158 +522,850 @@ rationale_short
     return prompt, full_len, used_len
 
 
-def load_curated_data(input_csv: Path, seed: int) -> pd.DataFrame:
-    df = pd.read_csv(input_csv)
+# ============================================================
+# 6. Response parsing
+# ============================================================
 
-    required_cols = [
+def safe_float01(x, default=0.0):
+
+    try:
+        x = float(x)
+        return max(0.0, min(1.0, x))
+
+    except Exception:
+        return default
+
+
+def parse_prediction_response(response_text):
+
+    text = response_text.strip()
+
+    try:
+        obj = json.loads(text)
+
+    except Exception:
+
+        start = text.find("{")
+        end = text.rfind("}")
+
+        if start >= 0 and end > start:
+            obj = json.loads(text[start:end + 1])
+
+        else:
+            raise RuntimeError(
+                f"Could not parse JSON from response:\n{text[:1000]}"
+            )
+
+    pred = obj.get("prediction")
+
+    if pred not in CLASSES:
+        raise RuntimeError(f"Invalid prediction: {pred}")
+
+    used = obj.get("used_modalities", [])
+
+    if not isinstance(used, list):
+        used = []
+
+    used = [
+        m for m in used
+        if m in ["sequence", "metadata"]
+    ]
+
+    return {
+        "prediction": pred,
+        "confidence": safe_float01(obj.get("confidence", 0)),
+        "used_modalities": used,
+        "sequence_reliance": safe_float01(
+            obj.get("sequence_reliance", 0)
+        ),
+        "metadata_reliance": safe_float01(
+            obj.get("metadata_reliance", 0)
+        ),
+        "rationale_short": str(
+            obj.get("rationale_short", "")
+        )[:500]
+    }
+
+
+# ============================================================
+# 7. OpenAI model call
+# ============================================================
+
+def call_model_once(row, variant):
+
+    prompt, full_len, used_len = build_prompt(
+        row,
+        variant
+    )
+
+    response = client.responses.create(
+        model=MODEL,
+
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "taskB_prediction",
+
+                "schema": {
+                    "type": "object",
+
+                    "additionalProperties": False,
+
+                    "properties": {
+
+                        "prediction": {
+                            "type": "string",
+                            "enum": CLASSES
+                        },
+
+                        "confidence": {
+                            "type": "number"
+                        },
+
+                        "used_modalities": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "sequence",
+                                    "metadata"
+                                ]
+                            }
+                        },
+
+                        "sequence_reliance": {
+                            "type": "number"
+                        },
+
+                        "metadata_reliance": {
+                            "type": "number"
+                        },
+
+                        "rationale_short": {
+                            "type": "string"
+                        }
+                    },
+
+                    "required": [
+                        "prediction",
+                        "confidence",
+                        "used_modalities",
+                        "sequence_reliance",
+                        "metadata_reliance",
+                        "rationale_short"
+                    ]
+                },
+
+                "strict": True
+            }
+        },
+
+        max_output_tokens=700
+    )
+
+    obj = parse_prediction_response(
+        response.output_text
+    )
+
+    # --------------------------------------------------------
+    # Enforce modality consistency
+    # --------------------------------------------------------
+    if variant == "metadata_only":
+
+        obj["sequence_reliance"] = 0.0
+
+        obj["used_modalities"] = [
+            m for m in obj["used_modalities"]
+            if m != "sequence"
+        ]
+
+    if variant == "sequence_only":
+
+        obj["metadata_reliance"] = 0.0
+
+        obj["used_modalities"] = [
+            m for m in obj["used_modalities"]
+            if m != "metadata"
+        ]
+
+    obj["full_sequence_length"] = full_len
+    obj["provided_sequence_length"] = used_len
+
+    return obj
+
+
+def call_model(row, variant, max_retries=4):
+
+    last_error = None
+
+    for attempt in range(max_retries):
+
+        try:
+            return call_model_once(row, variant)
+
+        except Exception as e:
+
+            last_error = e
+
+            wait = min(90, 2 ** attempt * 5)
+
+            print(
+                f"\n[Retry]"
+                f" accession={row.get('assembly_accession')}"
+                f" variant={variant}"
+                f" attempt={attempt+1}/{max_retries}"
+                f" wait={wait}s"
+                f" error={repr(e)}"
+            )
+
+            time.sleep(wait)
+
+    raise last_error
+
+
+# ============================================================
+# 8. Dataset loading
+# ============================================================
+
+def load_full_data():
+
+    if not os.path.exists(SEQ_CSV):
+        raise FileNotFoundError(
+            f"Missing file: {SEQ_CSV}"
+        )
+
+    df = pd.read_csv(SEQ_CSV)
+
+    required = [
         "assembly_accession",
         "organism_name",
         "joined_sequence",
-        "joined_seq_len",
+        "joined_seq_len"
     ]
 
-    missing = [c for c in required_cols if c not in df.columns]
+    missing = [c for c in required if c not in df.columns]
+
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise RuntimeError(
+            f"Missing required columns: {missing}"
+        )
 
-    df["true_label"] = df["organism_name"].apply(normalize_organism_name)
-    df = df[df["true_label"].isin(CLASSES)].copy()
+    # --------------------------------------------------------
+    # Normalize labels
+    # --------------------------------------------------------
+    df["label"] = df["organism_name"].apply(
+        normalize_organism_name
+    )
 
+    df = df[df["label"].isin(CLASSES)].copy()
+
+    # --------------------------------------------------------
+    # Remove missing sequence rows
+    # --------------------------------------------------------
     df = df[df["joined_sequence"].notna()].copy()
+
     df["joined_seq_len_numeric"] = pd.to_numeric(
         df["joined_seq_len"],
-        errors="coerce",
+        errors="coerce"
     )
-    df = df[df["joined_seq_len_numeric"] > 1000].copy()
 
-    df = df.drop_duplicates(subset=["assembly_accession"])
-    df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
+    df = df[
+        df["joined_seq_len_numeric"] > 1000
+    ].copy()
+
+    # --------------------------------------------------------
+    # Shuffle
+    # --------------------------------------------------------
+    df = df.sample(
+        frac=1,
+        random_state=SEED
+    ).reset_index(drop=True)
+
+    print("\nUsing FULL dataset")
+    print(df["label"].value_counts())
+
+    print("\nTotal samples:", len(df))
 
     return df
 
 
-def write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+# ============================================================
+# 9. Resume support
+# ============================================================
 
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+def load_existing_done(results_path):
 
+    if (
+        not os.path.exists(results_path)
+        or os.path.getsize(results_path) == 0
+    ):
+        return pd.DataFrame(), set()
 
-def build_task_dataset(args: argparse.Namespace) -> None:
-    rng = random.Random(args.seed)
+    res = pd.read_json(
+        results_path,
+        lines=True
+    )
 
-    df = load_curated_data(args.input_csv, args.seed)
+    if len(res) == 0:
+        return res, set()
 
-    if args.n_per_class is not None:
-        parts = []
-        for cls in CLASSES:
-            sub = df[df["true_label"] == cls].copy()
-            n = min(args.n_per_class, len(sub))
-            parts.append(sub.sample(n=n, random_state=args.seed))
+    res = res.drop_duplicates(
+        subset=[
+            "assembly_accession",
+            "variant"
+        ],
+        keep="last"
+    ).copy()
 
-        df = (
-            pd.concat(parts, axis=0)
-            .sample(frac=1, random_state=args.seed)
-            .reset_index(drop=True)
+    done = set(
+        zip(
+            res["assembly_accession"],
+            res["variant"]
         )
+    )
+
+    return res, done
+
+
+# ============================================================
+# 10. Metrics
+# ============================================================
+
+def compute_metrics(results_path, suffix=""):
+
+    if (
+        not os.path.exists(results_path)
+        or os.path.getsize(results_path) == 0
+    ):
+        print("[Metrics] No results yet.")
+        return None
+
+    res = pd.read_json(
+        results_path,
+        lines=True
+    )
+
+    res = res.drop_duplicates(
+        subset=[
+            "assembly_accession",
+            "variant"
+        ],
+        keep="last"
+    ).copy()
 
     rows = []
 
-    for _, row in df.iterrows():
-        for variant in args.variants:
-            prompt, full_len, used_len = build_prompt(
-                row=row,
-                variant=variant,
-                max_sequence_chars=args.max_sequence_chars,
-                perturb_rate=args.perturb_rate,
-                rng=rng,
+    report_lines = []
+
+    # --------------------------------------------------------
+    # Per-variant metrics
+    # --------------------------------------------------------
+    for variant, g in res.groupby("variant"):
+
+        g = g.dropna(
+            subset=["prediction", "true_label"]
+        ).copy()
+
+        g = g[g["prediction"].isin(CLASSES)]
+        g = g[g["true_label"].isin(CLASSES)]
+
+        if len(g) == 0:
+            continue
+
+        y_true = g["true_label"]
+        y_pred = g["prediction"]
+
+        rows.append({
+
+            "variant": variant,
+
+            "n": len(g),
+
+            "accuracy": accuracy_score(
+                y_true,
+                y_pred
+            ),
+
+            "balanced_accuracy": balanced_accuracy_score(
+                y_true,
+                y_pred
+            ),
+
+            "macro_f1": f1_score(
+                y_true,
+                y_pred,
+                average="macro",
+                zero_division=0
+            ),
+
+            "weighted_f1": f1_score(
+                y_true,
+                y_pred,
+                average="weighted",
+                zero_division=0
+            ),
+
+            "mean_confidence": float(
+                g["confidence"].mean()
+            ),
+
+            "mean_sequence_reliance_self_report": float(
+                g["sequence_reliance"].mean()
+            ),
+
+            "mean_metadata_reliance_self_report": float(
+                g["metadata_reliance"].mean()
+            ),
+
+            "mean_provided_sequence_length": float(
+                g["provided_sequence_length"].mean()
+            ),
+
+            "mean_full_sequence_length": float(
+                g["full_sequence_length"].mean()
+            )
+        })
+
+        report_lines.append(
+            f"\n\n===== {variant} =====\n"
+        )
+
+        report_lines.append(
+            classification_report(
+                y_true,
+                y_pred,
+                labels=CLASSES,
+                zero_division=0
+            )
+        )
+
+    metrics = pd.DataFrame(rows)
+
+    metrics_path = (
+        METRICS_CSV
+        if suffix == ""
+        else METRICS_CSV.replace(".csv", f"{suffix}.csv")
+    )
+
+    reliance_path = (
+        RELIANCE_CSV
+        if suffix == ""
+        else RELIANCE_CSV.replace(".csv", f"{suffix}.csv")
+    )
+
+    report_path = (
+        REPORT_TXT
+        if suffix == ""
+        else REPORT_TXT.replace(".txt", f"{suffix}.txt")
+    )
+
+    metrics.to_csv(metrics_path, index=False)
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
+
+    # --------------------------------------------------------
+    # Reliance summary
+    # --------------------------------------------------------
+    score = (
+        metrics.set_index("variant")["balanced_accuracy"]
+        .to_dict()
+        if len(metrics)
+        else {}
+    )
+
+    full = score.get("full")
+    seq = score.get("sequence_only")
+    meta = score.get("metadata_only")
+    cf = score.get("metadata_counterfactual")
+    pert = score.get("sequence_perturbed")
+
+    reliance = {
+
+        "full_balanced_accuracy": full,
+
+        "sequence_only_balanced_accuracy": seq,
+
+        "metadata_only_balanced_accuracy": meta,
+
+        "metadata_counterfactual_balanced_accuracy": cf,
+
+        "sequence_perturbed_balanced_accuracy": pert,
+
+        "metadata_necessity_score_full_minus_sequence_only":
+            None if full is None or seq is None
+            else full - seq,
+
+        "sequence_necessity_score_full_minus_metadata_only":
+            None if full is None or meta is None
+            else full - meta,
+
+        "metadata_counterfactual_sensitivity_full_minus_cf":
+            None if full is None or cf is None
+            else full - cf,
+
+        "sequence_robustness_drop_full_minus_perturbed":
+            None if full is None or pert is None
+            else full - pert
+    }
+
+    # --------------------------------------------------------
+    # Prediction consistency analysis
+    # --------------------------------------------------------
+    wide = res.pivot_table(
+        index="assembly_accession",
+        columns="variant",
+        values="prediction",
+        aggfunc="first"
+    ).reset_index()
+
+    for other in [
+        "sequence_only",
+        "metadata_only",
+        "metadata_counterfactual",
+        "sequence_perturbed"
+    ]:
+
+        key = f"full_vs_{other}_prediction_change_rate"
+
+        if (
+            "full" in wide.columns
+            and other in wide.columns
+        ):
+
+            valid = wide.dropna(
+                subset=["full", other]
+            ).copy()
+
+            reliance[key] = (
+                float(
+                    (valid["full"] != valid[other]).mean()
+                )
+                if len(valid)
+                else None
             )
 
-            assembly_accession = clean_val(row.get("assembly_accession"))
+        else:
+            reliance[key] = None
 
-            out = {
-                "sample_id": f"{assembly_accession}::{variant}",
-                "assembly_accession": assembly_accession,
-                "variant": variant,
-                "true_label": row["true_label"],
-                "organism_name_raw": clean_val(row.get("organism_name")),
-                "prompt": prompt,
-                "full_sequence_length": full_len,
-                "provided_sequence_length": used_len,
-                "joined_seq_len": int(float(row.get("joined_seq_len"))),
-                "host": clean_val(row.get("host")),
-                "host_disease": clean_val(row.get("host_disease")),
-                "isolation_source": clean_val(row.get("isolation_source")),
-                "body_site": clean_val(row.get("body_site")),
-                "geo_loc_name": clean_val(row.get("geo_loc_name")),
-                "strain": clean_val(row.get("strain")),
-                "isolate": clean_val(row.get("isolate")),
-                "assembly_level": clean_val(row.get("assembly_level")),
-                "refseq_category": clean_val(row.get("refseq_category")),
-                "submitter": clean_val(row.get("submitter")),
-            }
+    reliance_df = pd.DataFrame([reliance])
 
-            rows.append(out)
-
-    write_jsonl(args.output_jsonl, rows)
-
-    print("Saved:", args.output_jsonl)
-    print("Input samples:", len(df))
-    print("Variants:", len(args.variants))
-    print("Total task rows:", len(rows))
-    print()
-    print("Class counts:")
-    print(df["true_label"].value_counts().to_string())
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build Task B BioMM-Eval JSONL dataset from curated genome CSV."
+    reliance_df.to_csv(
+        reliance_path,
+        index=False
     )
 
-    parser.add_argument(
-        "--input-csv",
-        type=Path,
-        required=True,
-        help="Path to selected_sequences_saureus199_cacnes200.csv",
-    )
-    parser.add_argument(
-        "--output-jsonl",
-        type=Path,
-        required=True,
-        help="Output path for taskB_samples.jsonl",
-    )
-    parser.add_argument(
-        "--max-sequence-chars",
-        type=int,
-        default=DEFAULT_MAX_SEQUENCE_CHARS,
-    )
-    parser.add_argument(
-        "--perturb-rate",
-        type=float,
-        default=DEFAULT_PERTURB_RATE,
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=DEFAULT_SEED,
-    )
-    parser.add_argument(
-        "--n-per-class",
-        type=int,
-        default=None,
-        help="Optional balanced sample size per class. Default uses full dataset.",
-    )
-    parser.add_argument(
-        "--variants",
-        nargs="+",
-        default=VARIANTS,
-        choices=VARIANTS,
+    print("\n=== Metrics ===")
+    print(metrics.to_string(index=False))
+
+    print("\n=== Reliance summary ===")
+    print(reliance_df.to_string(index=False))
+
+    print("\nSaved:")
+    print("results:", RESULTS_JSONL)
+    print("metrics:", metrics_path)
+    print("reliance:", reliance_path)
+    print("report:", report_path)
+
+    return metrics
+
+
+# ============================================================
+# 11. Progress summary
+# ============================================================
+
+def summarize_progress(df, done):
+
+    expected = len(df) * len(VARIANTS)
+
+    completed = len(done)
+
+    remaining = expected - completed
+
+    print("\n=== Progress ===")
+
+    print("samples:", len(df))
+    print("variants:", len(VARIANTS))
+    print("expected rows:", expected)
+    print("completed rows:", completed)
+    print("remaining rows:", remaining)
+
+    print(
+        "completion rate:",
+        round(completed / expected * 100, 2),
+        "%"
     )
 
-    return parser.parse_args()
+    if done:
 
+        done_df = pd.DataFrame(
+            list(done),
+            columns=[
+                "assembly_accession",
+                "variant"
+            ]
+        )
+
+        print("\nCompleted by variant:")
+
+        print(
+            done_df["variant"]
+            .value_counts()
+            .reindex(VARIANTS)
+            .fillna(0)
+            .astype(int)
+            .to_string()
+        )
+
+
+# ============================================================
+# 12. Main evaluation loop
+# ============================================================
+
+def main():
+
+    # --------------------------------------------------------
+    # Load dataset
+    # --------------------------------------------------------
+    df = load_full_data()
+
+    print("\nPreview:")
+
+    preview_cols = [
+        "assembly_accession",
+        "label",
+        "organism_name",
+        "host",
+        "host_disease",
+        "isolation_source",
+        "body_site",
+        "joined_seq_len"
+    ]
+
+    preview_cols = [
+        c for c in preview_cols
+        if c in df.columns
+    ]
+
+    print(
+        df[preview_cols]
+        .head()
+        .to_string(index=False)
+    )
+
+    # --------------------------------------------------------
+    # Resume state
+    # --------------------------------------------------------
+    existing_res, done = load_existing_done(
+        RESULTS_JSONL
+    )
+
+    summarize_progress(df, done)
+
+    # --------------------------------------------------------
+    # Interim metrics
+    # --------------------------------------------------------
+    print("\nComputing interim metrics...")
+    compute_metrics(
+        RESULTS_JSONL,
+        suffix="_interim"
+    )
+
+    expected_total = len(df) * len(VARIANTS)
+
+    total_remaining = expected_total - len(done)
+
+    if total_remaining <= 0:
+
+        print("\nNothing left to run.")
+        print("Computing final metrics only.")
+
+        compute_metrics(RESULTS_JSONL)
+
+        print("SUCCESS")
+
+        return
+
+    # --------------------------------------------------------
+    # Run evaluation
+    # --------------------------------------------------------
+    print("\nRunning remaining predictions...")
+
+    completed_since_metric = 0
+
+    pbar = tqdm(total=total_remaining)
+
+    for _, row in df.iterrows():
+
+        for variant in VARIANTS:
+
+            key = (
+                row["assembly_accession"],
+                variant
+            )
+
+            if key in done:
+                continue
+
+            try:
+
+                pred = call_model(row, variant)
+
+                out = {
+
+                    "assembly_accession":
+                        row["assembly_accession"],
+
+                    "variant":
+                        variant,
+
+                    "true_label":
+                        row["label"],
+
+                    "organism_name_raw":
+                        row.get("organism_name"),
+
+                    "joined_seq_len":
+                        None if pd.isna(
+                            row.get("joined_seq_len")
+                        )
+                        else int(
+                            float(
+                                row.get("joined_seq_len")
+                            )
+                        ),
+
+                    "host":
+                        None if pd.isna(
+                            row.get("host", np.nan)
+                        )
+                        else row.get("host"),
+
+                    "host_disease":
+                        None if pd.isna(
+                            row.get("host_disease", np.nan)
+                        )
+                        else row.get("host_disease"),
+
+                    "isolation_source":
+                        None if pd.isna(
+                            row.get("isolation_source", np.nan)
+                        )
+                        else row.get("isolation_source"),
+
+                    "body_site":
+                        None if pd.isna(
+                            row.get("body_site", np.nan)
+                        )
+                        else row.get("body_site"),
+
+                    **pred
+                }
+
+                append_jsonl(
+                    RESULTS_JSONL,
+                    out
+                )
+
+                done.add(key)
+
+                pbar.update(1)
+
+                completed_since_metric += 1
+
+                time.sleep(0.25)
+
+                # ------------------------------------------------
+                # Periodic metrics
+                # ------------------------------------------------
+                if completed_since_metric >= 50:
+
+                    completed_since_metric = 0
+
+                    print("\n[Interim metrics]")
+
+                    compute_metrics(
+                        RESULTS_JSONL,
+                        suffix="_interim"
+                    )
+
+                    summarize_progress(df, done)
+
+            except Exception as e:
+
+                append_jsonl(
+                    FAILED_JSONL,
+                    {
+                        "assembly_accession":
+                            row.get(
+                                "assembly_accession",
+                                None
+                            ),
+
+                        "variant":
+                            variant,
+
+                        "true_label":
+                            row.get(
+                                "label",
+                                None
+                            ),
+
+                        "error":
+                            repr(e),
+
+                        "traceback":
+                            traceback.format_exc()
+                    }
+                )
+
+                print(
+                    "\nFAILED:",
+                    row.get(
+                        "assembly_accession",
+                        None
+                    ),
+                    variant,
+                    repr(e)
+                )
+
+                pbar.update(1)
+
+                time.sleep(3)
+
+    pbar.close()
+
+    # --------------------------------------------------------
+    # Final metrics
+    # --------------------------------------------------------
+    print("\nComputing final metrics...")
+
+    compute_metrics(RESULTS_JSONL)
+
+    print("\nSUCCESS")
+
+    print("results:", RESULTS_JSONL)
+    print("failed:", FAILED_JSONL)
+    print("metrics:", METRICS_CSV)
+    print("reliance:", RELIANCE_CSV)
+    print("report:", REPORT_TXT)
+
+
+# ============================================================
+# 13. Entry
+# ============================================================
 
 if __name__ == "__main__":
-    build_task_dataset(parse_args())
+    main()
