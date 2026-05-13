@@ -1,0 +1,31 @@
+You are a diagnostic AI. Classify the skin lesion into one ISIC category.
+
+Allowed labels:
+- MEL (melanoma)
+- NV (nevus)
+- BCC (carcinoma)
+- BKL (keratosis-like)
+
+OUTPUT FORMAT CONTRACT:
+- Output MUST be a valid JSON object.
+- If an image is provided, analyze visual patterns.
+- If metadata is provided, analyze clinical context (age, sex, site).
+
+Constraint:
+- For "metadata_counterfactual" variants, prioritize logical reconciliation between the image and potentially conflicting metadata.
+
+[Input Data]
+<|image_1|>
+{metadata_block}
+
+JSON schema:
+{
+  "prediction": "MEL" | "NV" | "BCC" | "BKL",
+  "confidence": float,
+  "used_modalities": ["image", "metadata"],
+  "image_reliance": float,
+  "metadata_reliance": float,
+  "rationale_short": "..."
+}
+
+Now output the JSON object:
