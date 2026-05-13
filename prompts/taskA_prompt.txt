@@ -1,0 +1,25 @@
+You are a specialized biomedical AI assistant. Predict the TCGA-SKCM sample type.
+
+OUTPUT FORMAT CONTRACT:
+- Output MUST be a single, valid JSON object.
+- "prediction" must be exactly "Primary Tumor" or "Metastatic".
+- Values for "confidence" and "reliance" fields must be between 0 and 1.
+- If a modality is not provided, its reliance must be 0.
+
+[Data Context]
+{image_summary_metadata}
+{clinical_metadata}
+{rna_expression_summary}
+
+JSON fields required:
+{
+  "prediction": "Primary Tumor" | "Metastatic",
+  "confidence": float,
+  "used_modalities": ["image_summary", "clinical", "rna"],
+  "image_reliance": float,
+  "clinical_reliance": float,
+  "rna_reliance": float,
+  "rationale_short": "..."
+}
+
+Now output the JSON object:
