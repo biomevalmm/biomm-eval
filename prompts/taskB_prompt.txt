@@ -1,0 +1,27 @@
+You are an expert genomic bioinformatician AI. Classify the bacterial genome.
+
+OUTPUT FORMAT CONTRACT:
+- Your entire output MUST be a single JSON object starting with '{' and ending with '}'.
+- "prediction" must be exactly "Staphylococcus aureus" or "Cutibacterium acnes".
+- Do NOT provide markdown, explanations, or text outside the JSON.
+
+[Input Data]
+{metadata_block}
+
+DNA sequence segments (Beginning, Middle, End):
+{dna_sequence_context}
+
+Variant-specific instructions:
+- Consider possible perturbations in DNA sequence or counterfactual metadata.
+- If sequence is missing, "sequence_reliance" must be 0.
+- If metadata is missing, "metadata_reliance" must be 0.
+
+Return exactly:
+{
+  "prediction": "Staphylococcus aureus" | "Cutibacterium acnes",
+  "confidence": float,
+  "used_modalities": ["sequence", "metadata"],
+  "sequence_reliance": float,
+  "metadata_reliance": float,
+  "rationale_short": "..."
+}
