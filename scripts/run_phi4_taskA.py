@@ -1,4 +1,4 @@
-import os, json, time, random, traceback, argparse
+import os, json, time, random, traceback, argparse, re
 from datetime import datetime
 from typing import List, Literal, Dict, Any
 
@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from pydantic import BaseModel, Field
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForCausalLM
 
 from taskA_prompts import build_taskA_prompt
 from taskA_utils import append_jsonl, load_jsonl_safe, clean_model_response, extract_json, safe_float01
@@ -36,8 +36,24 @@ class TaskAPrediction(BaseModel):
     rationale_short: str
 
 
+def clean_phi_response(text: str) -> str:
+    if text is None:
+        return ""
+
+    text = str(text)
+
+    # Remove Phi reasoning traces if present.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = text.replace("<think>", "").replace("</think>", "")
+    text = text.replace("<|im_start|>", "").replace("<|im_end|>", "")
+    text = text.replace("<|im_sep|>", "")
+    text = text.replace("<nothink>", "")
+
+    return clean_model_response(text).strip()
+
+
 def fallback_extract_prediction(response_text: str) -> Dict[str, Any]:
-    text = clean_model_response(response_text)
+    text = clean_phi_response(response_text)
     upper = text.upper()
 
     if "PRIMARY TUMOR" in upper or "PRIMARY" in upper:
@@ -59,7 +75,7 @@ def fallback_extract_prediction(response_text: str) -> Dict[str, Any]:
 
 
 def parse_prediction_response(response_text: str) -> Dict[str, Any]:
-    text = clean_model_response(response_text)
+    text = clean_phi_response(response_text)
 
     try:
         obj = extract_json(text)
@@ -122,6 +138,9 @@ def load_test_set(split_csv):
 
 
 def load_existing_done(results_path):
+    if not os.path.exists(results_path):
+        return set()
+
     res = load_jsonl_safe(results_path)
 
     if len(res) == 0:
@@ -154,34 +173,90 @@ def normalize_modalities(pred, variant):
     return pred
 
 
+def build_phi_prompt(prompt: str) -> str:
+    # Phi-4 reasoning models may emit reasoning unless explicitly discouraged.
+    # We keep the model response constrained to JSON for metric parsing.
+    return (
+        "<|im_start|>user<|im_sep|>\n"
+        "<nothink>\n"
+        f"{prompt}\n\n"
+        "Return only a valid JSON object. Do not include markdown, explanation, or extra text."
+        "<|im_end|>\n"
+        "<|im_start|>assistant<|im_sep|>\n"
+    )
+
+
+def generate_phi_response(model, processor, prompt_text, target_device, max_new_tokens):
+    inputs = processor(
+        text=prompt_text,
+        return_tensors="pt",
+    )
+
+    inputs = {
+        k: v.to(target_device) if torch.is_tensor(v) else v
+        for k, v in inputs.items()
+    }
+
+    input_len = inputs["input_ids"].shape[-1]
+
+    with torch.inference_mode():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+            pad_token_id=processor.tokenizer.eos_token_id,
+            eos_token_id=processor.tokenizer.eos_token_id,
+        )
+
+    generated_tokens = generated_ids[0, input_len:]
+
+    output_text = processor.tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=False,
+    ).strip()
+
+    return clean_phi_response(output_text)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split_csv", type=str, default="./examples/taskA_test_full.csv")
-    parser.add_argument("--out_dir", type=str, default="./outputs/taskA_phi4_vision")
-    parser.add_argument("--model_id", type=str, default="microsoft/Phi-4-multimodal-instruct")
+    parser.add_argument("--out_dir", type=str, default="./outputs/taskA_phi4_reasoning_vision")
+    parser.add_argument("--model_id", type=str, default="microsoft/Phi-4-reasoning-vision-15B")
     parser.add_argument("--task_setting", type=str, default="shortcut_controlled")
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--max_retries", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume_results", type=str, default=None)
     args = parser.parse_args()
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_prefix = f"taskA_phi4_vision_{run_id}"
+    run_prefix = f"taskA_phi4_reasoning_vision_{run_id}"
 
-    results_jsonl = os.path.join(args.out_dir, f"{run_prefix}_results.jsonl")
+    if args.resume_results is not None:
+        results_jsonl = args.resume_results
+        run_prefix = os.path.basename(results_jsonl).replace("_results.jsonl", "")
+    else:
+        results_jsonl = os.path.join(args.out_dir, f"{run_prefix}_results.jsonl")
+
     failed_jsonl = os.path.join(args.out_dir, f"{run_prefix}_failed.jsonl")
 
     print("=" * 80)
-    print("Task A Phi-4-Vision evaluation")
+    print("Task A Phi-4-Reasoning-Vision evaluation")
     print("model_id:", args.model_id)
     print("split_csv:", args.split_csv)
     print("results:", results_jsonl)
+    print("failed :", failed_jsonl)
     print("=" * 80)
 
     df = load_test_set(args.split_csv)
@@ -193,11 +268,12 @@ def main():
         trust_remote_code=True,
     )
 
-    model = AutoModelForImageTextToText.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto",
+        attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
     )
     model.eval()
 
@@ -213,78 +289,65 @@ def main():
             if key not in done:
                 todo.append((row_dict, variant))
 
+    print("Already completed:", len(done))
     print("Remaining evaluations:", len(todo))
 
     for row_dict, variant in tqdm(todo):
-        try:
-            prompt = build_taskA_prompt(
-                row_dict,
-                variant=variant,
-                task_setting=args.task_setting,
-            )
+        success = False
+        last_error = None
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ]
-
-            inputs = processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-            )
-
-            inputs = {
-                k: v.to(target_device) if torch.is_tensor(v) else v
-                for k, v in inputs.items()
-            }
-
-            with torch.inference_mode():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=args.max_new_tokens,
-                    do_sample=False,
+        for attempt in range(1, args.max_retries + 1):
+            try:
+                prompt = build_taskA_prompt(
+                    row_dict,
+                    variant=variant,
+                    task_setting=args.task_setting,
                 )
 
-            generated_tokens = generated_ids[0, inputs["input_ids"].size(1):]
-            output_text = processor.tokenizer.decode(
-                generated_tokens,
-                skip_special_tokens=True,
-            ).strip()
+                phi_prompt = build_phi_prompt(prompt)
 
-            pred = parse_prediction_response(output_text)
-            pred = normalize_modalities(pred, variant)
-            pred["raw_output"] = clean_model_response(output_text)
+                output_text = generate_phi_response(
+                    model=model,
+                    processor=processor,
+                    prompt_text=phi_prompt,
+                    target_device=target_device,
+                    max_new_tokens=args.max_new_tokens,
+                )
 
-            out = {
-                "model_id": args.model_id,
-                "case_barcode": row_dict["case_barcode"],
-                "variant": variant,
-                "true_label": row_dict["sample_type"],
-                "sample_type": row_dict.get("sample_type"),
-                "gender": None if pd.isna(row_dict.get("gender")) else row_dict.get("gender"),
-                "age_at_diagnosis": None if pd.isna(row_dict.get("age_at_diagnosis")) else row_dict.get("age_at_diagnosis"),
-                **pred,
-            }
+                pred = parse_prediction_response(output_text)
+                pred = normalize_modalities(pred, variant)
+                pred["raw_output"] = clean_phi_response(output_text)
 
-            append_jsonl(results_jsonl, out)
+                out = {
+                    "model_id": args.model_id,
+                    "case_barcode": row_dict["case_barcode"],
+                    "variant": variant,
+                    "true_label": row_dict["sample_type"],
+                    "sample_type": row_dict.get("sample_type"),
+                    "gender": None if pd.isna(row_dict.get("gender")) else row_dict.get("gender"),
+                    "age_at_diagnosis": None if pd.isna(row_dict.get("age_at_diagnosis")) else row_dict.get("age_at_diagnosis"),
+                    **pred,
+                }
 
-        except Exception as e:
+                append_jsonl(results_jsonl, out)
+                success = True
+                break
+
+            except Exception as e:
+                last_error = e
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                time.sleep(1)
+
+        if not success:
             fail = {
                 "model_id": args.model_id,
                 "case_barcode": row_dict.get("case_barcode"),
                 "variant": variant,
                 "true_label": row_dict.get("sample_type"),
-                "error": repr(e),
+                "error": repr(last_error),
                 "traceback": traceback.format_exc(),
             }
             append_jsonl(failed_jsonl, fail)
