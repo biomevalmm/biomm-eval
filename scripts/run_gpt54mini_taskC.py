@@ -571,7 +571,7 @@ def main():
         "--fixed_csv",
         type=str,
         required=True,
-        help="Fixed Task C CSV. Example: /content/drive/MyDrive/.../taskC_fixed.csv",
+        help="Fixed Task C CSV. Example: /YOUR PATH/.../taskC_fixed.csv",
     )
     parser.add_argument(
         "--image_root",
