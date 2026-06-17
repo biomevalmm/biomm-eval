@@ -64,7 +64,7 @@ MODEL_TAG = "gpt54mini"
 # ------------------------------------------------------------
 # Input dataset
 # ------------------------------------------------------------
-BASE_DIR = "/content/drive/MyDrive/_September_hard/task_09/meta_dna/auto_skin_genomes"
+BASE_DIR = "/auto_skin_genomes"
 
 SEQ_CSV = os.path.join(
     BASE_DIR,
