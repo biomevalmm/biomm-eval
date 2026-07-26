@@ -276,3 +276,23 @@ huggingface-cli download \
   --repo-type dataset \
   --local-dir data
 ```
+
+
+
+
+
+## Data sources and licenses
+
+BioMM-Eval uses data derived from public biomedical repositories:   
+
+- Task A: TCGA-SKCM data from the NCI Genomic Data Commons, with imaging-related metadata from the Imaging Data Commons   
+- Task B: bacterial genome assemblies and metadata from NCBI  
+- Task C: dermoscopic images and metadata from the ISIC 2019 challenge release  
+
+This repository distributes benchmark-ready CSV files and code, but does not redistribute all upstream raw data or images.   
+
+Users are responsible for complying with the access policies, citation requirements, and record-level licenses of the original data providers. In particular, ISIC image licenses may vary by image and should not be assumed to be uniform across the full dataset.      
+
+
+
+The source repository and benchmark file provenance are documented in the task-specific sections above.   
