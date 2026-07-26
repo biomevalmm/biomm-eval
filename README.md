@@ -43,10 +43,50 @@ BioMM-Eval provides scripts for constructing the three benchmark datasets used i
 
 ### Environment
 
-```bash
-pip install pandas numpy requests scikit-learn tqdm pillow matplotlib openai
-````
 
+Install the shared dependencies used for dataset construction, evaluation, and analysis:
+
+```bash
+pip install -r requirements.txt
+```
+
+API-backed and local models use separate dependency files because they require different framework versions.
+
+| Evaluation environment | Requirement file |
+|---|---|
+| API-backed models | `requirements_api.txt` |
+| Gemma | `requirements_gemma.txt` |
+| LLaVA-Next | `requirements_llava_next.txt` |
+| Phi-4 | `requirements_phi4.txt` |
+| DeepSeek-VL2 | `requirements_deepseek_vl2.txt` |
+| Molmo2 | `requirements_molmo2.txt` |
+| Qwen3.6 | `requirements_qwen36.txt` |
+
+Install the dependency file corresponding to the model being evaluated:
+
+```bash
+pip install -r requirements_api.txt
+```
+
+or, for a local model:
+
+```bash
+pip install -r requirements_gemma.txt
+```
+
+Replace `requirements_gemma.txt` with the appropriate model-specific file.
+
+Local models should be installed in separate virtual or Conda environments because some models require incompatible PyTorch, Transformers, CUDA, or auxiliary package versions. Install a PyTorch build compatible with the target CUDA runtime before installing the model-specific requirements.
+
+Example:
+
+```bash
+python -m venv .venv-gemma
+source .venv-gemma/bin/activate
+
+python -m pip install --upgrade pip
+pip install -r requirements_gemma.txt
+```
 Some tasks require external data downloads from public biomedical repositories.
 
 ---
