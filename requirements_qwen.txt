@@ -1,1 +1,21 @@
+-r requirements.txt
 
+# Qwen3.6 runtime dependencies
+#
+# Exact framework versions were not present in the recovered environment
+# snapshot. Replace the compatibility ranges below with exact versions
+# if the original notebook or model-level runtime is recovered.
+
+accelerate>=0.30,<2
+transformers>=4.45,<6
+huggingface-hub>=0.25,<2
+tokenizers>=0.19,<1
+safetensors>=0.4,<1
+sentencepiece>=0.2,<1
+einops>=0.8,<1
+
+filelock>=3.13,<4
+fsspec>=2024.3
+jinja2>=3.1,<4
+psutil>=5.9,<8
+regex>=2024.5
