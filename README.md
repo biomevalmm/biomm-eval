@@ -250,3 +250,24 @@ Balanced splits and counterfactual variants are generated deterministically give
 Large raw files, downloaded images, and model outputs are not committed to the repository. They should be regenerated using the scripts above.
 
 
+
+## Prepared benchmark data
+
+Prepared benchmark files used by the evaluation scripts are available at:
+
+https://huggingface.co/datasets/biomevalmm/bio-mm-eval
+
+Available files:
+
+- `taskA_test_full.csv`
+- `taskB_test_full.csv`
+- `taskC_test_balanced.csv`
+
+Download the dataset with:
+
+```bash
+huggingface-cli download \
+  biomevalmm/bio-mm-eval \
+  --repo-type dataset \
+  --local-dir data
+
