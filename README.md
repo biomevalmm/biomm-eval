@@ -87,8 +87,8 @@ source .venv-gemma/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements_gemma.txt
 ```
-Some tasks require external data downloads from public biomedical repositories.
 
+Prepared benchmark files can be downloaded from the BioMM-Eval Hugging Face dataset repository described below. The task-specific scripts may also be used to reconstruct the datasets from the original public biomedical repositories.
 ---
 
 ### Task A: TCGA-SKCM multimodal benchmark
