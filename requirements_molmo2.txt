@@ -1,1 +1,25 @@
+-r requirements.txt
 
+# Molmo2 execution environment
+#
+# Install the CUDA-specific PyTorch build separately before installing
+# this file. See README.md.
+
+accelerate==1.13.0
+transformers==4.57.1
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.7.0
+einops==0.8.2
+
+decord2==3.3.0
+molmo_utils==0.0.1
+av==17.0.1
+
+filelock==3.29.0
+fsspec==2025.3.0
+jinja2==3.1.6
+networkx==3.6.1
+psutil>=5.9,<8
+regex>=2025.11,<2027
+sympy==1.14.0
