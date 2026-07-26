@@ -295,4 +295,5 @@ Users are responsible for complying with the access policies, citation requireme
 
 
 
-The source repository and benchmark file provenance are documented in the task-specific sections above.   
+The original data sources and prepared benchmark files are identified in the task-specific sections above.   
+  
