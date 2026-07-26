@@ -248,7 +248,9 @@ seed = 42
 Balanced splits and counterfactual variants are generated deterministically given the same input data and seed.
 
 Large raw files, downloaded images, and model outputs are not committed to the repository. They should be regenerated using the scripts above.
+Prepared benchmark CSV files are also distributed through the BioMM-Eval Hugging Face dataset repository below. Large upstream source files, downloaded images, and model outputs are not included and may be reconstructed or regenerated using the task-specific scripts.
 
+---
 
 
 ## Prepared benchmark data
@@ -270,4 +272,4 @@ huggingface-cli download \
   biomevalmm/bio-mm-eval \
   --repo-type dataset \
   --local-dir data
-
+```
