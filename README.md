@@ -60,7 +60,7 @@ API-backed and local models use separate dependency files because they require d
 | Phi-4 | `requirements_phi4.txt` |
 | DeepSeek-VL2 | `requirements_deepseek_vl2.txt` |
 | Molmo2 | `requirements_molmo2.txt` |
-| Qwen3.6 | `requirements_qwen36.txt` |
+| Qwen3.6 | `requirements_qwen.txt` |
 
 Install the dependency file corresponding to the model being evaluated:
 
