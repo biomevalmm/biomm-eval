@@ -1,1 +1,26 @@
+-r requirements.txt
 
+# Phi-4 multimodal execution environment
+#
+# Install the CUDA-specific PyTorch build separately before installing
+# this file. See README.md.
+
+accelerate==1.13.0
+transformers==4.57.1
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.7.0
+sentencepiece==0.2.1
+einops==0.8.2
+
+xformers==0.0.35
+triton==3.4.0
+ninja==1.13.0
+
+filelock==3.29.0
+fsspec==2026.4.0
+jinja2==3.1.6
+networkx==3.4.2
+psutil==7.2.2
+regex==2026.4.4
+sympy==1.14.0
