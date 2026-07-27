@@ -1,10 +1,5 @@
 -r requirements.txt
 
-# Qwen3.6 runtime dependencies
-#
-# Exact framework versions were not present in the recovered environment
-# snapshot. Replace the compatibility ranges below with exact versions
-# if the original notebook or model-level runtime is recovered.
 
 accelerate>=0.30,<2
 transformers>=4.45,<6
